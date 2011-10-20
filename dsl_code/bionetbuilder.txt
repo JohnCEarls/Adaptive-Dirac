@@ -1,0 +1,18 @@
+Cytoscape bionetbuilder
+
+species: homo sapiens
+
+node source: 'nodes from my list' from file test.txt
+(first 44 GeneID's from bipolar dataset)
+
+interaction sources # edges generated (do not add 1st neighbors):
+ BIND (PP, PR, and PD) - 11631
+ BioGrid               - 24313
+ DIP                   - 1388
+ IntAct                - 20201
+ Interologger (all interaction types, 0.0 conf. thresh) - 24136
+ MINT (to be added)    - 11411
+ MPPI (to be added)    - 469
+ Prolinks (interaction prediction from rosetta stone, gene neighbor,
+           gene cluster, phylogenetic profile with .05 pValue) - 136770
+

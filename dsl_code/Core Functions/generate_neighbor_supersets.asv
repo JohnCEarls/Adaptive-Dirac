@@ -1,0 +1,49 @@
+function supersets = generate_neighbor_supersets(ppi, original, E_log10_QN, names_new)
+
+
+
+supersets = {};
+name = original{1};
+if strcmp(original{2}, 'na')
+    pathroot = '';
+else
+    pathroot = original{2};
+end
+already_included = {};
+for count=3:length(original)
+   if isempty(original{count})
+       original = original(1:count-1);
+       break
+   else
+       fieldname = strrep(original{count}, '-', '_');
+       fieldname = strrep(fieldname, '@', 'atsign');
+       already_included.(fieldname) = 1;
+   end
+end
+original = original(3:end);
+
+% consider each set of neighbors
+for i=1:length(original)
+    fieldname = strrep(original{i}, '-', '_');
+    fieldname = strrep(fieldname, '@', 'atsign');
+    if ~isfield(ppi, fieldname)
+        continue;
+    end
+    neighbors = ppi.(fieldname);
+    % only consider neighbors to add with actual expression values
+    gs_neighbors = gs_match_id(E_log10_QN, names_new, ['name','id',neighbors]);
+    for j=1:length(gs_neighbors.g_gs)
+        fieldname = strrep(gs_neighbors.g_gs{j}, '-', '_');
+        fieldname = strrep(fieldname, '@', 'atsign');
+        if isempty(fieldname)
+            break;
+        end
+        if isfield(already_included, fieldname)
+            continue
+        else
+            path = strcat(pathroot, '+',gs_neighbors.g_gs{j});
+            supersets = [supersets; [name, path, original, {gs_neighbors.g_gs{j}}]];
+            already_included.(fieldname) = 1;
+        end
+    end
+end

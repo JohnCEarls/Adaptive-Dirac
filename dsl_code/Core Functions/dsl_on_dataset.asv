@@ -1,0 +1,155 @@
+function cv_accuracy = dsl_on_dataset(E_log10_QN, groups, names_new, dataset, ...
+    num_networks, num_iterations, num_fdr_permuts, num_sffs_fdr_permuts, num_folds, ...
+    is_biocarta, eta_cutoff, jaccard_cutoff, is_extended_ppi)
+
+% important note: indices into gs_seed, gs_sffs, eta_seed, eta_sffs are all
+% different -> you must look at the gs_id name to map rows to each other ATM
+% this isn't so bad so long as few networks are considered at a time (top% 5)
+
+output_dir = char(strcat('../dsl_results/',dataset,'/', ...
+    int2str(num_networks), 'n', int2str(num_iterations), 'i', ...
+    int2str(num_fdr_permuts), 'p', int2str(num_folds * 100), 'f', ...
+    int2str(eta_cutoff * 1000), 'e', int2str(jaccard_cutoff * 100), 'j' ...
+));
+
+if is_extended_ppi
+    output_dir = char(strcat('2e_',output_dir));
+end
+
+if is_biocarta
+    output_dir = char(strcat(output_dir, '_B'));
+    load ../gs_definitions biocarta_gs_defs
+    genesets = biocarta_gs_defs;
+else
+    load ../hprd_lc_gs_defs
+    genesets = hprd_lc_gs_defs;
+end
+
+if not(isdir(output_dir))
+    mkdir(output_dir);
+end
+
+[E_log10_QN_train,groups_train,E_log10_QN_test,groups_test] = ...
+    split_sample_data(E_log10_QN, groups, num_folds);
+
+%gs_struct_train = gs_match_id(E_log10_QN_train,names_new,genesets);
+
+cv_performance_trace = cell(num_folds+1, 1);
+sffs_eta_trace = cell(num_folds, 1);
+eta_struct_seeds = cell(num_folds, 1);
+eta_struct_sffs = cell(num_folds, 1);
+gs_struct_seeds = cell(num_folds, 1);
+gs_struct_sffs = cell(num_folds, 1);
+mu_R_struct_seeds = cell(num_folds, 1);
+mu_R_struct_sffs = cell(num_folds, 1);
+mu_diff_struct_seeds = cell(num_folds, 1);
+mu_diff_struct_sffs = cell(num_folds, 1);
+
+combined_accuracy = [0 0]; % seeds vs sffs
+total_count = length(groups);
+
+for i=1:num_folds
+
+fprintf('Starting on fold %d\n', i);    
+    
+gs_struct_train = gs_match_id(E_log10_QN_train{i}, names_new, genesets);
+    
+%% sffs procedure
+
+[eta_gs,eta_stats] = eta_fdr(gs_struct_train,groups_train{i},num_fdr_permuts);
+
+[trace, final_networks, seeds] = ...
+    sffs(is_biocarta, eta_gs,E_log10_QN_train{i}, names_new, groups_train{i}, ...
+        num_networks, num_iterations, num_sffs_fdr_permuts, ...
+        eta_cutoff, jaccard_cutoff, is_extended_ppi);
+sffs_eta_trace{i} = trace;
+
+display 'SFFS complete'
+
+%% compare seeds vs sffs with LOOCV
+
+display 'Computing seeds vs sffs LOOCV'
+
+%gs_seeds = gs_match_id(E_log10_QN_test,names_new,seeds);
+%[classifiers_seeds,results_seeds] = eta_loocv(gs_seeds,groups_test,1);
+
+%gs_sffs = gs_match_id(E_log10_QN_test,names_new,final_networks);
+%[classifiers_sffs,results_sffs] = eta_loocv(gs_sffs,groups_test,1);
+
+new_gs_seeds.train = gs_match_id(E_log10_QN_train{i},names_new,seeds);
+new_gs_seeds.test = gs_match_id(E_log10_QN_test{i},names_new,seeds);
+new_groups_seeds.train = groups_train{i};
+new_groups_seeds.test = groups_test{i};
+[eta_gs_seeds,eta_stats_seeds] = eta_fdr(new_gs_seeds.test,groups_test{i},num_fdr_permuts);
+[train_perf_seeds, new_results_seeds]= new_eta_loocv(new_gs_seeds, new_groups_seeds, 1);
+
+new_gs_sffs.train = gs_match_id(E_log10_QN_train{i},names_new,final_networks);
+new_gs_sffs.test = gs_match_id(E_log10_QN_test{i},names_new,final_networks);
+new_groups_sffs.train = groups_train{i};
+new_groups_sffs.test = groups_test{i};
+[eta_gs_sffs,eta_stats_sffs] = eta_fdr(new_gs_sffs.test,groups_test{i},num_fdr_permuts);
+[train_perf_sffs, new_results_sffs]= new_eta_loocv(new_gs_sffs, new_groups_sffs, 1);
+
+cv_performance_trace{i} = [train_perf_seeds new_results_seeds; train_perf_sffs new_results_sffs];
+
+eta_struct_seeds{i}.name = strcat(dataset, ' (', datestr(now), ')');
+eta_struct_seeds{i}.gs = eta_gs_seeds;
+eta_struct_seeds{i}.stats = eta_stats_seeds;
+eta_struct_seeds{i}.accuracy = new_results_seeds(5);
+gs_struct_seeds{i} = new_gs_seeds;
+
+eta_struct_sffs{i}.name = strcat(dataset, ' (', datestr(now), ')');
+eta_struct_sffs{i}.gs = eta_gs_sffs;
+eta_struct_sffs{i}.stats = eta_stats_sffs;
+eta_struct_sffs{i}.accuracy = new_results_sffs(5);
+gs_struct_sffs{i} = new_gs_sffs;
+
+weight = length(groups_test{i});
+combined_accuracy(1) = combined_accuracy(1) + weight * new_results_seeds(5);
+combined_accuracy(2) = combined_accuracy(2) + weight * new_results_sffs(5);
+
+%% do DIRAC analyses
+
+display 'Performing DIRAC analyses'
+
+[mu_R_1_gs,mu_R_1_stats,mu_R_2_gs,mu_R_2_stats] = mu_R(new_gs_seeds.test,groups_test{i});
+mu_R_struct_seeds{i}.name = strcat(dataset, ' (', datestr(now), ')');
+mu_R_struct_seeds{i}.mu_R_1_gs = mu_R_1_gs;
+mu_R_struct_seeds{i}.mu_R_1_stats = mu_R_1_stats;
+mu_R_struct_seeds{i}.mu_R_2_gs = mu_R_2_gs;
+mu_R_struct_seeds{i}.mu_R_2_stats = mu_R_2_stats;
+
+[mu_R_1,mu_R_2,mu_diff_gs,mu_diff_stats] = mu_diff(new_gs_seeds.test,groups_test{i},num_fdr_permuts);
+mu_diff_struct_seeds{i}.name = strcat(dataset, ' (', datestr(now), ')');
+mu_diff_struct_seeds{i}.gs = mu_diff_gs;
+mu_diff_struct_seeds{i}.mu_R = [mu_R_1,mu_R_2];
+mu_diff_struct_seeds{i}.mu_diff = mu_diff_stats;
+
+[mu_R_1_gs,mu_R_1_stats,mu_R_2_gs,mu_R_2_stats] = mu_R(new_gs_sffs.test,groups_test{i});
+mu_R_struct_sffs{i}.name = strcat(dataset, ' (', datestr(now), ')');
+mu_R_struct_sffs{i}.mu_R_1_gs = mu_R_1_gs;
+mu_R_struct_sffs{i}.mu_R_1_stats = mu_R_1_stats;
+mu_R_struct_sffs{i}.mu_R_2_gs = mu_R_2_gs;
+mu_R_struct_sffs{i}.mu_R_2_stats = mu_R_2_stats;
+
+[mu_R_1,mu_R_2,mu_diff_gs,mu_diff_stats] = mu_diff(new_gs_sffs.test,groups_test{i},num_fdr_permuts);
+mu_diff_struct_sffs{i}.name = strcat(dataset, ' (', datestr(now), ')');
+mu_diff_struct_sffs{i}.gs = mu_diff_gs;
+mu_diff_struct_sffs{i}.mu_R = [mu_R_1,mu_R_2];
+mu_diff_struct_sffs{i}.mu_diff = mu_diff_stats;
+
+end
+
+cv_performance_trace{num_folds+1} = combined_accuracy / total_count; %#ok<NASGU>
+save(char(strcat(output_dir, '/cv_performance_trace')), 'cv_performance_trace');
+save(char(strcat(output_dir, '/sffs_eta_trace')), 'sffs_eta_trace');
+
+save(char(strcat(output_dir, '/eta_struct_seeds')), 'eta_struct_seeds');
+save(char(strcat(output_dir, '/gs_struct_seeds')), 'gs_struct_seeds');
+save(char(strcat(output_dir, '/eta_struct_sffs')), 'eta_struct_sffs');
+save(char(strcat(output_dir, '/gs_struct_sffs')), 'gs_struct_sffs');
+
+save(char(strcat(output_dir, '/mu_R_struct_seeds')), 'mu_R_struct_seeds');
+save(char(strcat(output_dir, '/mu_R_struct_sffs')), 'mu_R_struct_sffs');
+save(char(strcat(output_dir, '/mu_diff_struct_seeds')), 'mu_diff_struct_seeds');
+save(char(strcat(output_dir, '/mu_diff_struct_sffs')), 'mu_diff_struct_sffs');

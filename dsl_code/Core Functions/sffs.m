@@ -1,0 +1,199 @@
+function [eta_stats_all, final_networks, seeds] = sffs(is_biocarta, eta_gs_start, ...
+    E_log10_QN, names_new, groups, num_networks, iterations, num_permuts, ...
+    eta_cutoff, jaccard_cutoff, is_extended_ppi)
+%   ARGS
+% is_biocarta      using biocarta or lc network definitions
+% eta_gs_start     the seed network names (in eta_stats_start ordering)
+% E_log10_QN       expression values from the dataset of interest
+% names_new        gene symbol names from the dataset of interest
+% groups           the sample labelings from the dataset of interest
+% iterations       a simple termination condition for sffs
+% num_networks     the number of top networks to iterate sffs over
+% num_permuts      the number of permutations used to calculate eta p-values
+% eta_cutoff       ending iteration criteria for eta upper-bound
+% jaccard_cutoff   ending iteration criteria for jaccard similarity lower-bound
+% is_extended_ppi  use the ppi graph based on 2 degrees of distance
+%
+%   RETURNS
+% eta_stats_all    (num_networks x iterations) double array, eta values at each point
+% final networks   (num_networks x largest network size) string array, the
+%                  second column describes how the seed network changed each iteration
+% seeds            the starting points for SFFS
+
+%% algorithm overview
+% 0. calculate etas for all subsets of each of the seed networks
+% for each iteration and each seed network:
+% 1. find all variants of each of this generation's networks by adding 
+%    neighbors, considering the network as a set
+% 2. find the new eta's for each of these candidate networks
+% 3. select the highest variants for each of these seed networks
+% 4. geneerate each of the n-1 subsets (including the previous incarnation
+%    of this seed network
+% 5. find the new eta's for each of these subset networks
+% 6. select the greatest (in terms of eta) among these subsets. If it is the 
+%    n+1-1 network, pass the n+1 network (do not use the subset) to the next generation.
+%    If it is not, continue with step 7 for this seed network's 'descendent'
+%    before moving to the next generation.
+% 7. generate each of the n-2 subsets
+% 8. find the new eta's for each of these subset networks
+% 9. select the greatest of these, if it has eta less than the this seed
+%    network's previous incarnation at this size, use the previous subset
+%    and return to step 1. Else,  repeat from step 7 using the n-2 subset
+
+%% setup
+NUM_BIOCARTA_NETWORKS = 248;  %lose 1 network, eta_gs_start only has 248 from 249
+NUM_HPRD_LC_NETWORKS = 763;   %lose 14 networks, eta_gs_start only has 763 from 777
+
+if is_extended_ppi
+    load ../hprd_ppi_graph
+else
+    load ../hprd_ppi_graph_2edge
+end
+if is_biocarta
+    load ../gs_definitions biocarta_gs_defs
+    gs_defs = biocarta_gs_defs;
+    num_networks = min(num_networks, NUM_BIOCARTA_NETWORKS);
+else
+    load ../hprd_lc_gs_defs
+    gs_defs = hprd_lc_gs_defs;
+    num_networks = min(num_networks, NUM_HPRD_LC_NETWORKS);
+end
+
+num_networks = min(num_networks, size(eta_gs_start, 1));
+
+% get the list of seed networks only
+
+size_gs = size(gs_defs);
+max_network_length = size_gs(2);
+
+seeds = cell(num_networks, max_network_length);
+for i = 1:num_networks
+    if is_biocarta
+        for j = 1:size(gs_defs,1)
+            if strcmp(gs_defs{j, 1}, eta_gs_start{i})
+                network_index = j;
+            end
+        end
+    else
+        network_index = str2double(eta_gs_start{i}(1:strfind(eta_gs_start{i},'_')-1));
+    end
+    seeds(i,:) = gs_defs(network_index,:);
+end
+
+% set up reporting return values
+gs_seeds = gs_match_id(E_log10_QN, names_new, seeds);
+[eta_gs_seeds, eta_stats_seeds] = eta_fdr(gs_seeds, groups, num_permuts);
+eta_stats_all = eta_stats_seeds(:,5);
+final_networks = cell(num_networks, max_network_length+iterations);
+
+% obtain max values of eta for each seed networks' preceding subsets of size 2
+%   up to k-1. This structure is used to store subsequent eta's (k, k+1, ...).
+%   Note that values may change for previous eta's as 'new' maximums for
+%   each cardinality are found. It is assumed that, for the seeds' subsets,
+%   a set of size k has greater eta than a set of size k-1, for any k.
+%   (this is probably false, but yields some simplification)
+subset_etas = ...
+    find_all_subset_etas(seeds, E_log10_QN, names_new, groups, max_network_length, num_permuts);
+
+% for each seed network among the top num_networks eta
+for i = 1:num_networks
+    cur_network = seeds(i,:);
+    % run a cycle of sffs (forward +1, backwards -0 or more)
+    j = 1;
+    while j <= iterations
+    %% 1. forward step (inclusion)
+        kplusone = generate_neighbor_supersets(ppi, cur_network, E_log10_QN, names_new);
+        gs_kplusone = gs_match_id(E_log10_QN, names_new, kplusone);
+        [eta_gs_kplusone,eta_stats_kplusone] = eta_fdr(gs_kplusone, groups, num_permuts);
+%% 2. backward step (conditional exclusion)
+        kplusoneminusone = generate_subsets(kplusone(eta_stats_kplusone(1,1), :));
+        gs_kplusoneminusone = gs_match_id(E_log10_QN, names_new, kplusoneminusone);
+        [eta_gs_kplusoneminusone,eta_stats_kplusoneminusone] = ...
+            eta_fdr(gs_kplusoneminusone, groups, num_permuts);
+        index = eta_stats_kplusoneminusone(1,1);
+        for a=1:length(eta_gs_kplusoneminusone)
+            if strcmp(eta_gs_kplusoneminusone{a}, 'orig')
+                orig_eta = eta_stats_kplusoneminusone(a,5);
+                %orig_index = eta_stats_kplusoneminusone{a,1};
+                break;
+            end
+        end
+%% 3. continuation of conditional exclusion
+        % end this iteration or not
+        if strcmp(gs_kplusoneminusone.gs{index}, 'orig') == 0
+            % do continuation
+            cur_network = [seeds{i,1}, ...
+                gs_kplusoneminusone.gs_id{index} gs_kplusoneminusone.g_gs(index, :)];
+            cur_eta = eta_stats_kplusoneminusone(1,5);
+            while(nonempty_elements(cur_network) > 6)
+                kprimeminusone = generate_subsets(cur_network);
+                gs_kprimeminusone = gs_match_id(E_log10_QN, names_new, kprimeminusone);
+                [eta_gs_kprimeminusone,eta_stats_kprimeminusone] = ...
+                    eta_fdr(gs_kprimeminusone, groups, num_permuts);
+                best_eta = eta_stats_kprimeminusone(1,5);
+                % repeat another continuation of conditional exclusion or not
+                % -2-1-1: -2 discount name,na fields then -1 for no subsets of
+                %         size 1 used, finally -1 because we are comparing
+                %         the eta against the kprime -1 network
+                if best_eta >= subset_etas(i, length(cur_network)-2-1-1)
+                    % repeat with k'-1 network
+                    index = eta_stats_kprimeminusone(1,1);
+                    cur_network = [seeds{i,1}, ...
+                        gs_kprimeminusone.gs_id{index} gs_kprimeminusone.g_gs(index, :)];
+                    cur_eta = best_eta;
+                    subset_etas(i, length(cur_network)-2-1-1) = best_eta;
+                else
+                    % go onto the next iteration with the k' network
+                    break;
+                end
+            end
+            %show that this iteration ended in the network 'path'
+            cur_network{2} = strcat(cur_network{2}, '|');
+            % update the iteration values for this seed on this iteration
+            eta_stats_all(i, j+1) = cur_eta;
+            delim = '';
+            if cur_eta - eta_stats_all(i, j) < eta_cutoff
+                delim = '/';
+            end    
+            if jaccard_genesets(cur_network, seeds(i,1)) < jaccard_cutoff
+                delim = '*';
+            end
+            if ~isempty(delim)
+                while(j <= iterations)
+                    eta_stats_all(i, j+1) = eta_stats_kplusone(1,5);
+                    cur_network{2} = strcat(cur_network{2}, delim);
+                    % skip the remaining iterations
+                    j = j+1;
+                end
+            end
+        else % what we added last (the k+1 gene) was least significant, include it
+            % go onto the next iteration with the k+1 network
+            index = eta_stats_kplusone(1,1);
+            cur_network = [seeds{i,1}, strcat(gs_kplusone.gs_id{index},'|') gs_kplusone.g_gs(index, :)];
+            % update the subset_eta value for size k
+            subset_etas(i, length(cur_network)-2-1) = orig_eta;
+            % update the iteration values for this seed on this iteration
+            eta_stats_all(i, j+1) = eta_stats_kplusone(1,5);
+            delim = '';
+            if eta_stats_all(i, j+1) - eta_stats_all(i, j) < eta_cutoff
+                delim = '/';
+            end    
+            if jaccard_genesets(cur_network, seeds(i,1)) < jaccard_cutoff
+                delim = '*';
+            end
+            if ~isempty(delim)
+                while(j <= iterations)
+                    eta_stats_all(i, j+1) = eta_stats_kplusone(1,5);
+                    cur_network{2} = strcat(cur_network{2}, delim);
+                    % skip the remaining iterations
+                    j = j+1;
+                end
+            end
+        end
+        j = j + 1; % next iterations
+    end
+    disp(['Completed SFFS for seed network #' num2str(i)]); 
+    % contains the network 'path' taken by the seed network just run, 
+    %   as well as final network members
+    final_networks(i, :) = [cur_network cell(1,size(final_networks, 2)-length(cur_network))];
+end
